@@ -15,4 +15,4 @@ And set zfs property as follows:
 
 zfs set control:remote_sync=backup-server rpool/example
 
-Frequency of remote sync and number of backup snapshots stored ade defined in backup_server.conf
+Frequency of remote sync and number of backup snapshots stored are defined in backup_server.conf
