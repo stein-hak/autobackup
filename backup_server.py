@@ -1,47 +1,154 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 import sys
-
-sys.path.append('/opt/lib/')
-from zfs import zfs
-from datetime import datetime, timedelta
-from config_parser import my_conf
-from threading import Thread
-
+import os
 import time
 from collections import OrderedDict
-from ssh_new import ssh_send
-from multiprocessing import Pool
-from functools import partial
-from event import send_event
+
+sys.path.append('/opt/lib/')
+from zfs_api_client import zfs
+from datetime import datetime, timedelta
+from backup_config import BackupConfig
+from threading import Thread
+
+# zfs instance is already created in zfs_api_client.py and imported above
+# No need to instantiate again
 
 
-zfs = zfs()
+def remote_sync(backup_dataset, destination):
+    """Simplified remote sync using API migration with task tracking"""
+    local_dataset = backup_dataset.local_dataset
+    remote_host = destination.remote_host
+    remote_dataset = destination.get_target_dataset(local_dataset)
+    
+    print('Performing remote sync for %s to %s:%s' % (local_dataset, remote_host, remote_dataset))
+    
+    try:
+        # Use API for migration - it returns a task_id for tracking
+        result = zfs.adaptive_send(
+            dataset=local_dataset,
+            recurse=True,
+            verbose=False,
+            remote_host=remote_host,
+            remote_dataset=remote_dataset
+        )
+        
+        # Check if migration was started successfully
+        if result.task_id:
+            print('Remote sync started for %s to %s:%s (task: %s)' % 
+                  (local_dataset, remote_host, remote_dataset, result.task_id))
+            destination.current_task_id = result.task_id
+            return True
+        else:
+            print('Remote sync failed to start for %s to %s:%s' % 
+                  (local_dataset, remote_host, remote_dataset))
+            return False
+            
+    except Exception as e:
+        print('Remote sync for %s to %s:%s failed: %s' %
+              (local_dataset, remote_host, remote_dataset, e))
+        return False
 
 
-def remote_sync(host,fs):
-    ret = {}
-    last_remote_sync_time = fs.last_remote_sync_time[host]
-    recv_dataset = fs.remote_sync_hosts[host]
-    sender = ssh_send(host=host,dataset=fs.fs,verbose=False,sync=True,recv_dataset=recv_dataset)
-    print('Performing remote sync for %s to %s' % (fs.fs,host))
-    if sender.state == 1:
-        try:
-            sender.send_snapshot()
-        except:
-            pass
+def update_destination_sync_times(backup_dataset):
+    """
+    Update last_sync_time for each destination based on holds.
+    Parses sync holds to find the latest sync time per remote host.
+    """
+    dataset = backup_dataset.local_dataset
 
-    fs.get_remote_sync()
-    if last_remote_sync_time != fs.last_remote_sync_time[host]:
-        ret[host] = (1,fs.fs)
-        print('Remote sync for %s to %s successfull' % (fs.fs,host))
-    else:
-        print('Remote sync for %s to %s failed' % (fs.fs, host))
-        ret[host] = (0,fs.fs)
+    try:
+        # Get all holds on all snapshots for this dataset
+        holds = zfs.get_holds(dataset)
 
-    return ret
+        # Parse holds to find latest sync time per host
+        # holds format: {"snapshot_name": ["hold_tag1", "hold_tag2"]}
+        sync_times = {}  # {hostname: datetime}
+
+        for snap_name, hold_list in holds.items():
+            for hold_tag in hold_list:
+                try:
+                    # Parse hold format: sync_YYYY-MM-DD-HH-MM-SS_hostname
+                    if hold_tag.startswith('sync_'):
+                        parts = hold_tag.split('_')
+                        if len(parts) >= 3:
+                            timestr = parts[1]  # YYYY-MM-DD-HH-MM-SS
+                            host = parts[2]      # hostname/IP
+
+                            # Parse the timestamp
+                            try:
+                                sync_time = datetime.strptime(timestr, '%Y-%m-%d-%H-%M-%S')
+                            except ValueError:
+                                # Try alternate format without seconds
+                                try:
+                                    sync_time = datetime.strptime(timestr, '%Y-%m-%d-%H-%M')
+                                except ValueError:
+                                    continue
+
+                            # Keep only the latest sync time for each host
+                            if host not in sync_times or sync_time > sync_times[host]:
+                                sync_times[host] = sync_time
+                except Exception as e:
+                    # Skip malformed hold tags
+                    continue
+
+        # Update destination objects with discovered sync times
+        # Only update if hold time is newer than current in-memory value
+        for destination in backup_dataset.destinations:
+            if destination.remote_host and destination.remote_host in sync_times:
+                hold_time = sync_times[destination.remote_host]
+                # Only update if we don't have a time, or hold is newer
+                if not destination.last_sync_time or hold_time > destination.last_sync_time:
+                    destination.last_sync_time = hold_time
+
+    except Exception as e:
+        print(f'Error updating destination sync times for {dataset}: {e}')
 
 
+def get_backup_snapshots(local_dataset):
+    """
+    Get backup snapshots and determine last snapshot time.
+    Returns: (snapshots_dict, last_snapshot_time)
+    """
+    snapshots = {}
+    last_snapshot_time = None
+
+    try:
+        # Get all snapshots for the dataset via API
+        all_snaps = zfs.get_snapshots(local_dataset)
+        backup_snapshots = []
+
+        # Filter for backup snapshots (format: type_backup_YYYY-MM-DD-HH-MM)
+        for snap in all_snaps:
+            if '_backup_' in snap:
+                backup_snapshots.append(snap)
+
+        if backup_snapshots:
+            # Determine last snapshot time from the latest backup snapshot
+            latest_snap = backup_snapshots[-1]
+            try:
+                # Parse snapshot name: frequent_backup_2026-01-10-12-30
+                parts = latest_snap.split('_')
+                if len(parts) >= 3:
+                    timestr = parts[2]  # YYYY-MM-DD-HH-MM
+                    last_snapshot_time = datetime.strptime(timestr, '%Y-%m-%d-%H-%M')
+            except Exception as e:
+                print(f'Warning: Could not parse timestamp from snapshot {latest_snap}: {e}')
+
+            # Group snapshots by type (frequent, hourly, daily, weekly, monthly, yearly)
+            for snap in backup_snapshots:
+                try:
+                    snap_type = snap.split('_')[0]  # Get the first part (type)
+                    if snap_type not in snapshots:
+                        snapshots[snap_type] = []
+                    snapshots[snap_type].append(snap)
+                except:
+                    pass
+
+    except Exception as e:
+        print(f'Error getting backup snapshots for {local_dataset}: {e}')
+
+    return snapshots, last_snapshot_time
 
 
 class backup_fs():
@@ -132,67 +239,60 @@ class backup_fs():
 
 
 class backup_server(Thread):
-    def __init__(self):
+    def __init__(self, config_file='backup_config.yaml'):
         Thread.__init__(self)
-        self.conf = my_conf('/opt/autobackup/backup_server.conf')
-        self.days = self.conf.get('general', 'days', '1111111')
-        self.hours = self.conf.get('general', 'hours', '111111111111111111111111')
-        self.backup_interval = self.conf.getint('general', 'backup_interval', 600)
-        self.keep_frequent = self.conf.getint('general', 'keep_frequent', 4)
-        self.keep_hourly = self.conf.getint('general', 'keep_hourly', 12)
-        self.keep_daily = self.conf.getint('general', 'keep_daily', 7)
-        self.keep_weekly = self.conf.getint('general', 'keep_weekly', 4)
-        self.keep_monthly = self.conf.getint('general', 'keep_monthly', 6)
-        self.keep_yearly = self.conf.getint('general', 'keep_yearly', 3)
 
-        self.remote_sync = self.conf.getboolean('general','remote_sync',False)
-        self.remote_sync_days = self.conf.get('general', 'remote_sync_days', '1111111')
-        self.remote_sync_hours = self.conf.get('general', 'remot_sync_hours', '111111111111111111111111')
-        self.remote_sync_interval = self.conf.getint('general','remote_sync_interval',86400)
+        # Load unified YAML configuration
+        self.backup_config = BackupConfig(config_file)
 
-        self.cleanup_tags = {'frequent': self.keep_frequent, 'hourly': self.keep_hourly, 'daily': self.keep_daily,
-                             'monthly': self.keep_monthly, 'yearly': self.keep_yearly,'weekly':self.keep_weekly}
+        # Server settings (from unified config)
+        self.days = self.backup_config.server.days
+        self.hours = self.backup_config.server.hours
+        self.backup_interval = self.backup_config.server.backup_interval
 
-        self.fs_to_backup = {}
+        # Retention settings
+        self.keep_frequent = self.backup_config.server.keep_frequent
+        self.keep_hourly = self.backup_config.server.keep_hourly
+        self.keep_daily = self.backup_config.server.keep_daily
+        self.keep_weekly = self.backup_config.server.keep_weekly
+        self.keep_monthly = self.backup_config.server.keep_monthly
+        self.keep_yearly = self.backup_config.server.keep_yearly
+
+        # Remote sync settings
+        self.remote_sync = self.backup_config.server.remote_sync
+        self.remote_sync_days = self.backup_config.server.remote_sync_days
+        self.remote_sync_hours = self.backup_config.server.remote_sync_hours
+        self.remote_sync_interval = self.backup_config.server.remote_sync_interval
+
+        # Cleanup tags for snapshot retention
+        self.cleanup_tags = self.backup_config.server.get_cleanup_tags()
+
         self.interrupt = False
-        self.pool = None
-        self.remote_sync_workers = {}
+        self.active_migrations = {}  # Track running migrations: {task_id: (destination, backup_dataset, start_time)}
+        self.last_progress_log = {}  # Track when we last logged progress: {task_id: timestamp}
 
-    def reload_fs(self):
-        all = zfs.get(property='control:autobackup')
-        for i in all.keys():
-            fs = i
-            value = all[i]
-            try:
-                type = zfs.type(fs)[0]
-            except:
-                type = None
-            if type and type != 'snapshot':
-                if fs not in self.fs_to_backup.keys():
-                    if value:
-                        if value == 'active':
-                            remote_sync = zfs.get(fs,'control:remote_sync')
-                            remote_sync_hosts = {}
-                            for i in remote_sync.split(','):
-                                if len(i.split(':')) > 1:
-                                    host = i.split(':')[0]
-                                    dataset = i.split(':')[1]
-                                else:
-                                    host = i
-                                    dataset = None
-                                remote_sync_hosts[host] = dataset
-                            
-                            if remote_sync_hosts and self.remote_sync:
-                                back_fs = backup_fs(fs=fs, type=type, active=True,remote_sync=True,remote_sync_hosts=remote_sync_hosts)
-                            else:
-                                back_fs = backup_fs(fs=fs,type=type, active=True)
+    def reload_config(self):
+        """Reload backup configuration from file and update active migration references"""
+        old_count = len(self.backup_config.datasets)
+        self.backup_config.reload_config()
+        new_count = len(self.backup_config.datasets)
 
-                            back_fs.get_backup_snapshots()
-                            self.fs_to_backup[fs] = back_fs
-                        elif value == 'passive':
-                            back_fs = backup_fs(fs=fs, type=type, active=False)
-                            back_fs.get_backup_snapshots()
-                            self.fs_to_backup[fs] = back_fs
+        # Update active_migrations to reference new destination objects
+        for task_id, (old_dest, backup_dataset, start_time) in list(self.active_migrations.items()):
+            # Find the new destination object that matches the old one
+            for new_ds in self.backup_config.datasets:
+                if new_ds.local_dataset == backup_dataset.local_dataset:
+                    for new_dest in new_ds.destinations:
+                        if (new_dest.remote_host == old_dest.remote_host and
+                            new_dest.remote_dataset == old_dest.remote_dataset):
+                            # Update reference to new destination object
+                            self.active_migrations[task_id] = (new_dest, new_ds, start_time)
+                            break
+                    break
+
+        # Only log if config changed
+        if old_count != new_count:
+            print(f"Config reloaded: {old_count} -> {new_count} datasets")
 
     def check_schedule(self):
         now = datetime.now()
@@ -222,96 +322,182 @@ class backup_server(Thread):
             return False
 
 
-    def cleanup_time(self, fs):
-        holds = zfs.get_holds(fs.fs)
+    def cleanup_dataset(self, backup_dataset):
+        """Cleanup old snapshots and sync holds for a dataset"""
+        dataset = backup_dataset.local_dataset
+        
+        # Clean up old sync holds - keep only latest per host
+        holds = zfs.get_holds(dataset)
         hosts = {}
         for snap in holds.keys():
             tags = holds[snap]
             for tag in tags:
                 try:
-                    parts = tag.split('_')
-                    if parts[0] == 'sync': #and datetime.strptime(parts[1], '%Y-%m-%d-%M-%S'):
-                        host = parts[2]
-                        if host not in hosts.keys():
-                            hosts[host] = OrderedDict()
+                    if tag.startswith('sync_'):  # API format: sync_YYYY-MM-DD-HH-MM-SS_hostname
+                        parts = tag.split('_')
+                        if len(parts) >= 3:
+                            host = parts[2]
+                            if host not in hosts:
+                                hosts[host] = OrderedDict()
                             hosts[host][snap] = tag
                 except:
                     pass
 
-        for host in hosts.keys(): # Keep only one sync hold per remote host
+        # Keep only latest sync hold per remote host
+        for host in hosts.keys():
             for snap in list(hosts[host].keys())[:-1]:
-                zfs.release(fs,snap,hosts[host][snap])
+                zfs.release(dataset, snap, hosts[host][snap])
 
-        zfs.autoremove(dataset=fs.fs, tags=self.cleanup_tags)
+        # Remove old backup snapshots based on retention policy
+        zfs.autoremove(dataset=dataset, tags=self.cleanup_tags)
 
-    def remote_sync_mp(self):
-        fs_to_sync = {}
-        if not self.remote_sync_workers:
-            for fs in list(self.fs_to_backup.values()):
-                if fs.remote_sync and fs.remote_sync_hosts:
-                    fs.get_remote_sync()
-                    for host in fs.remote_sync_hosts:
-                        if not fs.last_remote_sync_time[host] or (datetime.now() - fs.last_remote_sync_time[host] >= timedelta(seconds=self.remote_sync_interval)):
-                            if not fs_to_sync.get(fs):
-                                fs_to_sync[fs] = [host]
-                            else:
-                                fs_to_sync[fs].append(host)
+    def remote_sync_async(self):
+        """Handle async migrations - start new ones and check status of running ones"""
+        # Check status of running migrations
+        completed_tasks = []
+        completed_datasets = set()  # Track datasets that completed in this cycle
+        now = datetime.now()
 
-            if not fs_to_sync:
-                if self.pool:
-                    self.pool.close()
-                    self.pool = None
+        for task_id, (destination, backup_dataset, start_time) in self.active_migrations.items():
+            try:
+                status = zfs.get_migration_status(task_id)
 
+                if status and status.get("status") in ["completed", "failed", "cancelled"]:
+                    print(f'Migration {task_id} for {backup_dataset.local_dataset} to {destination.remote_host}: {status.get("status")}')
+                    completed_tasks.append(task_id)
+                    completed_datasets.add(backup_dataset.local_dataset)  # Track this dataset
 
+                    # Clear current_task_id regardless of success/failure
+                    destination.current_task_id = None
+
+                    if status.get("status") == "completed":
+                        # Set sync time immediately to prevent re-triggering
+                        destination.last_sync_time = datetime.now()
+
+                    # Clean up progress tracking
+                    if task_id in self.last_progress_log:
+                        del self.last_progress_log[task_id]
+
+                elif status and status.get("status") == "running":
+                    # Log progress periodically (every 60 seconds)
+                    last_log = self.last_progress_log.get(task_id)
+                    if not last_log or (now - last_log).total_seconds() >= 60:
+                        progress = status.get("progress", {})
+                        percentage = progress.get("percentage", 0)
+                        rate_mbps = progress.get("rate_mbps", 0)
+                        eta_seconds = progress.get("eta_seconds", 0)
+
+                        eta_min = eta_seconds // 60
+                        eta_sec = eta_seconds % 60
+
+                        print(f'Migration {backup_dataset.local_dataset} -> {destination.remote_host}: '
+                              f'{percentage:.1f}% complete, {rate_mbps:.2f} Mbps, ETA: {eta_min}m {eta_sec}s')
+
+                        self.last_progress_log[task_id] = now
+
+            except Exception as e:
+                print(f'Error checking migration {task_id}: {e}')
+                completed_tasks.append(task_id)
+                completed_datasets.add(backup_dataset.local_dataset)  # Track this dataset
+                # Clear task_id on error too
+                destination.current_task_id = None
+                if task_id in self.last_progress_log:
+                    del self.last_progress_log[task_id]
+
+        # Remove completed migrations
+        for task_id in completed_tasks:
+            del self.active_migrations[task_id]
+        
+        # Start new migrations for datasets that need syncing
+        for backup_dataset in self.backup_config.get_datasets_with_remote_sync():
+            # Update sync times from holds (skip if we just completed a migration for this dataset)
+            if backup_dataset.local_dataset not in completed_datasets:
+                update_destination_sync_times(backup_dataset)
             else:
-                if not self.pool:
-                    self.pool = Pool(2)
-                for fs in fs_to_sync.keys():
-                    sync = partial(remote_sync,fs=fs)
-                    map = self.pool.map_async(sync,fs_to_sync[fs])
-                    self.remote_sync_workers[fs] = map
-        else:
-            for fs in list(self.remote_sync_workers.keys()):
-                if self.remote_sync_workers[fs].ready():
-                    ret = self.remote_sync_workers[fs].get()
-                    del self.remote_sync_workers[fs]
+                print(f'Skipping update_destination_sync_times for {backup_dataset.local_dataset} (just completed)')
+
+            # Check via API if any migration is already running for this dataset
+            if zfs.has_running_migration(backup_dataset.local_dataset):
+                print(f'Skipping {backup_dataset.local_dataset}: migration already running')
+                continue  # Skip this dataset - already has a migration running
+
+            for destination in backup_dataset.get_enabled_destinations():
+                if destination.is_local_only():
+                    print(f'Skipping destination: local-only')
+                    continue  # Skip local-only destinations
+
+                # Check if migration is needed
+                if destination.last_sync_time:
+                    time_diff = (datetime.now() - destination.last_sync_time).total_seconds()
+                    needs_sync = time_diff >= self.remote_sync_interval
+                    print(f'Check {backup_dataset.local_dataset} -> {destination.remote_host}: last_sync={destination.last_sync_time}, time_diff={time_diff:.0f}s, interval={self.remote_sync_interval}s, needs_sync={needs_sync}')
+                else:
+                    needs_sync = True
+                    print(f'Check {backup_dataset.local_dataset} -> {destination.remote_host}: last_sync=None, needs_sync=True')
+
+                if needs_sync:
+                    success = remote_sync(backup_dataset, destination)
+                    if success and destination.current_task_id:
+                        self.active_migrations[destination.current_task_id] = (destination, backup_dataset, datetime.now())
+                        break  # Only start one migration per dataset per cycle
 
 
 
 
     def run(self):
         while not self.interrupt:
-            self.reload_fs()
+            self.reload_config()
 
-            for fs in self.fs_to_backup.values():
-                if self.check_schedule():
-                    fs.get_backup_snapshots()
-                    self.cleanup_time(fs)
-                    now = datetime.utcnow()
+            for backup_dataset in self.backup_config.get_datasets_for_backup():
+                schedule_ok = self.check_schedule()
+                if not schedule_ok:
+                    continue
 
-                    if fs.active:
-                        tag = None
-                        if not fs.last_snapshot_time:
+                # Get backup snapshots and last snapshot time
+                snapshots, last_snapshot_time = get_backup_snapshots(backup_dataset.local_dataset)
+                backup_dataset.snapshots = snapshots
+                backup_dataset.last_snapshot_time = last_snapshot_time
+
+                # Cleanup old snapshots
+                self.cleanup_dataset(backup_dataset)
+                now = datetime.utcnow()
+
+                # Create new snapshot if needed
+                if backup_dataset.active:
+                    tag = None
+                    if not backup_dataset.last_snapshot_time:
+                        tag = 'frequent'
+                    else:
+                        if backup_dataset.last_snapshot_time.strftime('%Y') != now.strftime('%Y'):
+                            tag = 'yearly'
+                        elif backup_dataset.last_snapshot_time.strftime('%m') != now.strftime('%m'):
+                            tag = 'monthly'
+                        elif backup_dataset.last_snapshot_time.strftime('%W') != now.strftime('%W'):
+                            tag = 'weekly'
+                        elif backup_dataset.last_snapshot_time.strftime('%d') != now.strftime('%d'):
+                            tag = 'daily'
+                        elif backup_dataset.last_snapshot_time.strftime('%H') != now.strftime('%H'):
+                            tag = 'hourly'
+                        elif now - backup_dataset.last_snapshot_time > timedelta(seconds=self.backup_interval):
                             tag = 'frequent'
-                        else:
-                            if fs.last_snapshot_time.strftime('%Y') != now.strftime('%Y'):
-                                tag = 'yearly'
-                            elif fs.last_snapshot_time.strftime('%m') != now.strftime('%m'):
-                                tag = 'monthly'
-                            elif fs.last_snapshot_time.strftime('%W') != now.strftime('%W'):
-                                tag = 'weekly'
-                            elif fs.last_snapshot_time.strftime('%d') != now.strftime('%d'):
-                                tag = 'daily'
-                            elif fs.last_snapshot_time.strftime('%H') != now.strftime('%H'):
-                                tag = 'hourly'
-                            elif now - fs.last_snapshot_time > timedelta(seconds=self.backup_interval):
-                                tag = 'frequent'
 
-                        if tag:
-                            fs.auto_snap(tag=tag)
+                    if tag:
+                        # Create snapshot - only log this action
+                        try:
+                            zfs.set(backup_dataset.local_dataset, 'snapdir', 'visible')
+                            rc, name = zfs.snapshot_auto(backup_dataset.local_dataset, tag, tag1='backup')
+                            if rc == 0:
+                                print(f"Created {tag} snapshot: {backup_dataset.local_dataset}@{name}")
+                            else:
+                                print(f"ERROR: Failed to create {tag} snapshot for {backup_dataset.local_dataset} (rc={rc})")
+                        except Exception as e:
+                            print(f"ERROR: Exception creating snapshot for {backup_dataset.local_dataset}: {e}")
 
             if self.check_remote_sync_schedule():
-                self.remote_sync_mp()
+                print(f'Remote sync schedule check: OK, checking {len(self.backup_config.get_datasets_with_remote_sync())} datasets')
+                self.remote_sync_async()
+            # else:
+            #     print(f'Remote sync schedule check: SKIP (enabled={self.remote_sync})')
 
 
 
@@ -319,5 +505,9 @@ class backup_server(Thread):
 
 
 if __name__ == '__main__':
-    back = backup_server()
+    # Get config file from environment variable or use default
+    config_file = os.environ.get('CONFIG_FILE', 'backup_config.yaml')
+
+    print(f"Autobackup started: {config_file}")
+    back = backup_server(config_file)
     back.run()

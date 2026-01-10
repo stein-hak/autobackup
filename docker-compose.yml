@@ -1,0 +1,27 @@
+services:
+  autobackup:
+    build: .
+    container_name: autobackup-server
+    image: autobackup:latest
+
+    # Use host network to access ZFS API on localhost:8545
+    network_mode: host
+
+    volumes:
+      # Mount unified config file (read-only)
+      - ./backup_config.yaml:/opt/autobackup/config/backup_config.yaml:ro
+      # Mount timezone info from host
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+
+    environment:
+      - CONFIG_FILE=/opt/autobackup/config/backup_config.yaml
+      - PYTHONUNBUFFERED=1
+
+    restart: unless-stopped
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

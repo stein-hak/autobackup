@@ -1,0 +1,13 @@
+# ZFS Autobackup Server Requirements
+
+# Core dependencies
+PyYAML>=6.0
+requests>=2.25.0
+
+# Optional dependencies (if needed)
+# paramiko>=2.7.0  # For SSH operations (if not using API)
+# psutil>=5.8.0    # For system monitoring
+
+# Development/Testing dependencies  
+# pytest>=6.0.0
+# pytest-asyncio>=0.18.0
