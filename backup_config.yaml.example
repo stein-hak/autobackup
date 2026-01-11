@@ -1,0 +1,62 @@
+# Unified ZFS Autobackup Configuration
+# All settings for backup server and datasets in one file
+
+# Global Server Settings
+server:
+  # Backup check interval (seconds)
+  backup_interval: 600  # Check every 10 minutes
+
+  # Schedule: 1=run, 0=skip
+  # Days: Mon Tue Wed Thu Fri Sat Sun (7 chars)
+  schedule:
+    days: "1111111"  # Run every day
+    hours: "111111111111111111111111"  # Run every hour (24 chars)
+
+  # Snapshot retention policies (how many to keep)
+  retention:
+    frequent: 4   # Keep 4 frequent snapshots (10-min intervals)
+    hourly: 12      # Keep 12 hourly snapshots
+    daily: 7        # Keep 7 daily snapshots
+    weekly: 4       # Keep 4 weekly snapshots
+    monthly: 6      # Keep 6 monthly snapshots
+    yearly: 3       # Keep 3 yearly snapshots
+
+  # Remote sync settings
+  remote_sync:
+    enabled: true
+    interval: 300  # seconds between sync attempts (300 = 5 minutes for testing)
+    days: "1111111"  # Mon-Sun (1=enabled)
+    hours: "111111111111111111111111"  # All 24 hours
+
+# ZFS API connection settings
+zfs_api:
+  url: "http://localhost:8545"
+  timeout: 30
+
+# Dataset backup configurations
+datasets:
+  # Test dataset with remote backup - ACTIVE
+  - local_dataset: "syspool/backup_test"
+    destinations:
+      - remote_host: "192.168.10.152"
+        remote_dataset: "archive/backup_test"
+        enabled: true
+
+  # Disabled datasets (commented out for testing)
+  # - local_dataset: "syspool/test"
+  #   destinations:
+  #     - remote_host: "192.168.10.152"
+  #       remote_dataset: "archive/test_backup_server"
+  #       enabled: true
+
+  # - local_dataset: "syspool/benchmark_test"
+  #   destinations:
+  #     - remote_host: "192.168.10.152"
+  #       remote_dataset: "archive/benchmark_backup"
+  #       enabled: true
+  #     - remote_host: "192.168.10.152"
+  #       remote_dataset: "archive/benchmark_backup2"
+  #       enabled: false
+
+  # - local_dataset: "syspool/home"
+  #   destinations: []
