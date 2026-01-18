@@ -40,7 +40,15 @@ class ZFSAPIClient:
             
         except requests.exceptions.RequestException as e:
             raise Exception(f"API Connection Error: {e}")
-    
+
+    def health_check(self):
+        """Check if ZFS API is accessible"""
+        try:
+            response = self.session.get(f"{self.api_url.rstrip('/')}/health", timeout=5)
+            return response.status_code == 200
+        except:
+            return False
+
     def set(self, dataset, property, value):
         """Set dataset property"""
         params = {

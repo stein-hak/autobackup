@@ -446,20 +446,21 @@ class backup_server(Thread):
 
     def run(self):
         while not self.interrupt:
-            self.reload_config()
+            try:
+                self.reload_config()
 
-            for backup_dataset in self.backup_config.get_datasets_for_backup():
-                schedule_ok = self.check_schedule()
-                if not schedule_ok:
-                    continue
+                for backup_dataset in self.backup_config.get_datasets_for_backup():
+                    schedule_ok = self.check_schedule()
+                    if not schedule_ok:
+                        continue
 
-                # Get backup snapshots and last snapshot time
-                snapshots, last_snapshot_time = get_backup_snapshots(backup_dataset.local_dataset)
-                backup_dataset.snapshots = snapshots
-                backup_dataset.last_snapshot_time = last_snapshot_time
+                    # Get backup snapshots and last snapshot time
+                    snapshots, last_snapshot_time = get_backup_snapshots(backup_dataset.local_dataset)
+                    backup_dataset.snapshots = snapshots
+                    backup_dataset.last_snapshot_time = last_snapshot_time
 
-                # Cleanup old snapshots
-                self.cleanup_dataset(backup_dataset)
+                    # Cleanup old snapshots
+                    self.cleanup_dataset(backup_dataset)
                 now = datetime.utcnow()
 
                 # Create new snapshot if needed
@@ -493,13 +494,22 @@ class backup_server(Thread):
                         except Exception as e:
                             print(f"ERROR: Exception creating snapshot for {backup_dataset.local_dataset}: {e}")
 
-            if self.check_remote_sync_schedule():
-                print(f'Remote sync schedule check: OK, checking {len(self.backup_config.get_datasets_with_remote_sync())} datasets')
-                self.remote_sync_async()
-            # else:
-            #     print(f'Remote sync schedule check: SKIP (enabled={self.remote_sync})')
+                if self.check_remote_sync_schedule():
+                    print(f'Remote sync schedule check: OK, checking {len(self.backup_config.get_datasets_with_remote_sync())} datasets')
+                    self.remote_sync_async()
+                # else:
+                #     print(f'Remote sync schedule check: SKIP (enabled={self.remote_sync})')
 
-
+            except Exception as e:
+                # Check if it's an API connection issue
+                api_available = zfs.health_check()
+                if not api_available:
+                    print(f'ERROR: ZFS API is not responding at {self.backup_config.api.url}')
+                    print(f'       Backup cycle skipped. Will retry in {self.backup_interval / 10:.0f}s...')
+                else:
+                    print(f'ERROR: Backup cycle failed: {e}')
+                    print(f'       Will retry in {self.backup_interval / 10:.0f}s...')
+                # Continue running - don't crash on errors
 
             time.sleep(self.backup_interval / 10)
 
