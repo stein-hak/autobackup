@@ -53,15 +53,31 @@ curl http://localhost:8545/health
 
 ### 4. Deploy
 
-**Docker (Recommended):**
+**Option A: Systemd Service (Recommended for servers)**
+```bash
+# Automated installation
+sudo ./install.sh
+
+# Manual installation
+sudo pip3 install -r requirements.txt
+sudo cp autobackup.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now autobackup
+sudo systemctl status autobackup
+
+# View logs
+sudo journalctl -u autobackup -f
+```
+
+**Option B: Docker**
 ```bash
 docker-compose up --build -d
 docker-compose logs -f
 ```
 
-**Native Python:**
+**Option C: Manual Python**
 ```bash
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 python3 backup_server.py
 ```
 
