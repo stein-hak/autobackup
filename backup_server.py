@@ -485,7 +485,11 @@ class backup_server(Thread):
                     if tag:
                         # Create snapshot - only log this action
                         try:
-                            zfs.set(backup_dataset.local_dataset, 'snapdir', 'visible')
+                            # Only set snapdir for filesystems, not zvols
+                            dataset_type = zfs.type(backup_dataset.local_dataset)
+                            if dataset_type and dataset_type[0] == 'filesystem':
+                                zfs.set(backup_dataset.local_dataset, 'snapdir', 'visible')
+
                             rc, name = zfs.snapshot_auto(backup_dataset.local_dataset, tag, tag1='backup')
                             if rc == 0:
                                 print(f"Created {tag} snapshot: {backup_dataset.local_dataset}@{name}")

@@ -9,6 +9,7 @@ Type=simple
 User=root
 WorkingDirectory=/opt/autobackup
 Environment=CONFIG_FILE=/opt/autobackup/backup_config.yaml
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 /opt/autobackup/backup_server.py
 Restart=always
 RestartSec=60
