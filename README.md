@@ -31,7 +31,7 @@ backup_config.py  →  backup_config.yaml
 ### 1. Clone Repository
 
 ```bash
-git clone git@github.com:stein-hak/autobackup.git
+git clone https://github.com/stein-hak/autobackup.git
 cd autobackup
 ```
 
