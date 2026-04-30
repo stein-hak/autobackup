@@ -461,42 +461,42 @@ class backup_server(Thread):
 
                     # Cleanup old snapshots
                     self.cleanup_dataset(backup_dataset)
-                now = datetime.utcnow()
+                    now = datetime.utcnow()
 
-                # Create new snapshot if needed
-                if backup_dataset.active:
-                    tag = None
-                    if not backup_dataset.last_snapshot_time:
-                        tag = 'frequent'
-                    else:
-                        if backup_dataset.last_snapshot_time.strftime('%Y') != now.strftime('%Y'):
-                            tag = 'yearly'
-                        elif backup_dataset.last_snapshot_time.strftime('%m') != now.strftime('%m'):
-                            tag = 'monthly'
-                        elif backup_dataset.last_snapshot_time.strftime('%W') != now.strftime('%W'):
-                            tag = 'weekly'
-                        elif backup_dataset.last_snapshot_time.strftime('%d') != now.strftime('%d'):
-                            tag = 'daily'
-                        elif backup_dataset.last_snapshot_time.strftime('%H') != now.strftime('%H'):
-                            tag = 'hourly'
-                        elif now - backup_dataset.last_snapshot_time > timedelta(seconds=self.backup_interval):
+                    # Create new snapshot if needed
+                    if backup_dataset.active:
+                        tag = None
+                        if not backup_dataset.last_snapshot_time:
                             tag = 'frequent'
+                        else:
+                            if backup_dataset.last_snapshot_time.strftime('%Y') != now.strftime('%Y'):
+                                tag = 'yearly'
+                            elif backup_dataset.last_snapshot_time.strftime('%m') != now.strftime('%m'):
+                                tag = 'monthly'
+                            elif backup_dataset.last_snapshot_time.strftime('%W') != now.strftime('%W'):
+                                tag = 'weekly'
+                            elif backup_dataset.last_snapshot_time.strftime('%d') != now.strftime('%d'):
+                                tag = 'daily'
+                            elif backup_dataset.last_snapshot_time.strftime('%H') != now.strftime('%H'):
+                                tag = 'hourly'
+                            elif now - backup_dataset.last_snapshot_time > timedelta(seconds=self.backup_interval):
+                                tag = 'frequent'
 
-                    if tag:
-                        # Create snapshot - only log this action
-                        try:
-                            # Only set snapdir for filesystems, not zvols
-                            dataset_type = zfs.type(backup_dataset.local_dataset)
-                            if dataset_type and dataset_type[0] == 'filesystem':
-                                zfs.set(backup_dataset.local_dataset, 'snapdir', 'visible')
+                        if tag:
+                            # Create snapshot - only log this action
+                            try:
+                                # Only set snapdir for filesystems, not zvols
+                                dataset_type = zfs.type(backup_dataset.local_dataset)
+                                if dataset_type and dataset_type[0] == 'filesystem':
+                                    zfs.set(backup_dataset.local_dataset, 'snapdir', 'visible')
 
-                            rc, name = zfs.snapshot_auto(backup_dataset.local_dataset, tag, tag1='backup')
-                            if rc == 0:
-                                print(f"Created {tag} snapshot: {backup_dataset.local_dataset}@{name}")
-                            else:
-                                print(f"ERROR: Failed to create {tag} snapshot for {backup_dataset.local_dataset} (rc={rc})")
-                        except Exception as e:
-                            print(f"ERROR: Exception creating snapshot for {backup_dataset.local_dataset}: {e}")
+                                rc, name = zfs.snapshot_auto(backup_dataset.local_dataset, tag, tag1='backup')
+                                if rc == 0:
+                                    print(f"Created {tag} snapshot: {backup_dataset.local_dataset}@{name}")
+                                else:
+                                    print(f"ERROR: Failed to create {tag} snapshot for {backup_dataset.local_dataset} (rc={rc})")
+                            except Exception as e:
+                                print(f"ERROR: Exception creating snapshot for {backup_dataset.local_dataset}: {e}")
 
                 if self.check_remote_sync_schedule():
                     print(f'Remote sync schedule check: OK, checking {len(self.backup_config.get_datasets_with_remote_sync())} datasets')
